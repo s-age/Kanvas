@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+.swiftpm/
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+Kanvas.app/
+*.dmg
+release.log
+.claude/skills/*/scripts/node_modules/

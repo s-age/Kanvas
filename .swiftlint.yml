@@ -1,0 +1,234 @@
+included:
+  - Sources
+
+excluded:
+  - Sources/DI         # DI containers wire all layers; intentional high coupling
+
+# ── Phased rule introduction ──────────────────────────────────────────────────
+# Default rules stay disabled via `only_rules`; each phase opts in incrementally.
+#   Phase 1 — layer-import enforcement (custom_rules)
+#   Phase 2 — opt-in basic style rules
+#   Phase 3 — length / complexity rules (planned)
+only_rules:
+  - custom_rules
+  # Phase 2: basic style
+  - empty_count
+  - first_where
+  - explicit_init
+  - closure_end_indentation
+  # Phase 3: size / complexity
+  - file_length
+  - type_body_length
+  - function_body_length
+  - function_parameter_count
+  - cyclomatic_complexity
+  - nesting
+  - line_length
+
+# ── Phase 3 thresholds (mirrors ../10slide/.swiftlint.yml — perclst-derived) ───
+file_length:
+  warning: 300
+  error: 300
+  ignore_comment_only_lines: true
+
+type_body_length:
+  warning: 200
+  error: 200
+
+function_body_length:
+  warning: 50
+  error: 50
+
+function_parameter_count:
+  warning: 4
+  error: 4
+  ignores_default_parameters: true
+
+cyclomatic_complexity:
+  warning: 10
+  error: 10
+  ignores_case_statements: true
+
+nesting:
+  type_level:
+    warning: 2
+    error: 2
+  function_level:
+    warning: 3
+    error: 3
+
+line_length:
+  warning: 120
+  error: 120
+  ignores_comments: true
+  ignores_urls: true
+
+# ── Layer dependency enforcement ──────────────────────────────────────────────
+# Architecture: Presentation → UseCase → Domain → Repository → Infrastructure
+# (Error is a shared leaf accessible from any layer.)
+#
+# your-usual uses these OS-level Infrastructure frameworks (banned in upper
+# layers): UserNotifications (notifications) and AppKit (NSWorkspace). AppKit is
+# already covered by the UI-import rules below; the infrastructure-import rules
+# guard the non-UI framework (UserNotifications). Process / NSAppleScript live in
+# Foundation, so they need no ban.
+# UI frameworks (banned in Domain/UseCase/Repository): SwiftUI, UIKit,
+# AppKit, QuartzCore.
+custom_rules:
+  domain_no_infrastructure_imports:
+    included: "Sources/Domain/.*\\.swift"
+    name: "Domain No Infrastructure Imports"
+    regex: "^import (UserNotifications)"
+    message: "Domain layer must not import infrastructure frameworks. Use Repository protocols instead."
+    severity: error
+
+  domain_no_ui_imports:
+    included: "Sources/Domain/.*\\.swift"
+    name: "Domain No UI Imports"
+    regex: "^import (SwiftUI|UIKit|AppKit|QuartzCore)"
+    message: "Domain layer must not import UI frameworks."
+    severity: error
+
+  usecase_no_ui_imports:
+    included: "Sources/UseCase/.*\\.swift"
+    name: "UseCase No UI Imports"
+    regex: "^import (SwiftUI|UIKit|AppKit|QuartzCore)"
+    message: "UseCase layer must not import UI frameworks."
+    severity: error
+
+  usecase_no_infrastructure_imports:
+    included: "Sources/UseCase/.*\\.swift"
+    name: "UseCase No Infrastructure Imports"
+    regex: "^import (UserNotifications)"
+    message: "UseCase layer must not import infrastructure frameworks. Use Repository protocols instead."
+    severity: error
+
+  repositories_no_ui_imports:
+    included: "Sources/Repository/.*\\.swift"
+    name: "Repository No UI Imports"
+    regex: "^import (SwiftUI|UIKit|AppKit|QuartzCore)"
+    message: "Repository layer must not import UI frameworks."
+    severity: error
+
+  repositories_no_infrastructure_imports:
+    included: "Sources/Repository/.*\\.swift"
+    name: "Repository No Infrastructure Imports"
+    regex: "^import (UserNotifications)"
+    message: "Repository layer must not import OS infrastructure frameworks directly. Depend on Infrastructure/Protocols (DataSource/Store protocols) instead."
+    severity: error
+
+  errors_only_foundation:
+    included: "Sources/Error/.*\\.swift"
+    name: "Error layer imports only Foundation"
+    regex: "^import (?!Foundation([\\. ]|$)).*"
+    message: "Error is a leaf-node layer; may import Foundation only."
+    severity: error
+
+  constants_only_foundation:
+    included: "Sources/Constants/.*\\.swift"
+    name: "Constants layer imports only Foundation"
+    regex: "^import (?!Foundation([\\. ]|$)).*"
+    message: "Constants is a leaf-node layer (shared contract vocabulary); may import Foundation only."
+    severity: error
+
+  utils_only_foundation:
+    included: "Sources/Utils/.*\\.swift"
+    name: "Utils layer imports only Foundation"
+    regex: "^import (?!Foundation([\\. ]|$)).*"
+    message: "Utils is a leaf-node layer (pure functions, no dependencies); may import Foundation only."
+    severity: error
+
+  # Presentation is SwiftUI-only; AppKit/UIKit/QuartzCore are confined to App/.
+  # (UniformTypeIdentifiers — a UTType content-type vocabulary, not a UI framework —
+  # is intentionally permitted for `.fileImporter` content types; see
+  # arch-presentation.md.)
+  # Exception: TWO sanctioned AppKit surfaces in Presentation — Views/Markdown/ and
+  # Canvas/. macOS 15's SwiftUI TextEditor renders only plain text, so styling Markdown
+  # *as it is typed* requires an NSTextView (NSViewRepresentable); the sticky Canvas needs
+  # a self-drawn NSView so pinch-zoom + click hit-testing stay consistent (a CALayer
+  # transform desyncs AppKit's frame-based hit-testing). AppKit is confined to those two
+  # folders; everywhere else Presentation stays SwiftUI-only.
+  presentation_no_appkit:
+    included: "Sources/Presentation/.*\\.swift"
+    excluded: "Sources/Presentation/(Views/Markdown|Canvas)/.*\\.swift"
+    name: "Presentation No AppKit Imports"
+    regex: "^import (AppKit|UIKit|QuartzCore)"
+    message: "Presentation is SwiftUI-only. AppKit (NSWorkspace etc.) belongs in App/ or the sanctioned Views/Markdown/ editor or Canvas/; route OS capabilities through UseCase."
+    severity: error
+
+  # ── Cross-layer type references (single-module blindspot mitigation) ───────
+  # Single SPM module: layer-crossing type references emit no `import`, so the
+  # `^import` rules above can't catch them. Guard Infra protocol/DTO names within
+  # Presentation by naming *family* (suffix), not enumerated literals — so the
+  # rule survives type renames. Covers every `*StoreProtocol` / `*RunnerProtocol`
+  # / `*LauncherProtocol` / `*DTO`, plus the irregular Infra protocols. Concrete
+  # adapter class names (e.g. `ProcessRunner`) are intentionally NOT matched —
+  # they appear legitimately in doc comments.
+  presentation_no_infrastructure_types:
+    included: "Sources/Presentation/.*\\.swift"
+    name: "Presentation must not reference Infrastructure types"
+    regex: "\\b(\\w+(StoreProtocol|RunnerProtocol|LauncherProtocol)|\\w+DTO|NotifierProtocol|DiagnosticsSinkProtocol|DirectoryProbeProtocol|LegacyRegistryReaderProtocol|TxContextProtocol)\\b"
+    message: "Presentation must not reference Infrastructure protocols/types. Route capabilities through UseCase or inject a closure via DI."
+    severity: error
+
+  # Single SPM module: Repository may legitimately reference Infrastructure
+  # *protocols* (e.g. `any ProcessRunnerProtocol`) and Domain entities/DTOs, but
+  # must never instantiate a concrete Infrastructure class (that's DI's job) nor
+  # reach up into UseCase-layer types. With one module these crossings emit no
+  # `import`, so guard them by literal type name. The `\s*\(` anchor matches a
+  # constructor call only — `processRunner.run(...)`, `any ProcessRunnerProtocol`,
+  # and DTO/entity types (RegistryDTO, CommandResult, …) stay allowed.
+  repository_no_infrastructure_instantiation:
+    included: "Sources/Repository/.*\\.swift"
+    name: "Repository must not instantiate Infrastructure classes"
+    regex: "\\b(AppleScriptRunner|WorkspaceLauncher|TerminalLauncher|NotificationDataSource|ReuseWindowStore|TerminalPreferenceStore|InstalledAppStore|LegacyRegistryMigrator|LoginItemStore|ProcessRunner|DirectoryProbe)\\s*\\("
+    message: "Repository must not construct concrete Infrastructure classes. Depend on the matching Infrastructure/Protocols type and let DI inject it (single-module: this crossing emits no import to catch)."
+    severity: error
+
+  repository_no_usecase_types:
+    included: "Sources/Repository/.*\\.swift"
+    name: "Repository must not reference UseCase types"
+    regex: "\\b\\w+(UseCase|Request|Response)\\b"
+    message: "Repository must not reference UseCase-layer types (names ending in UseCase/Request/Response). Dependencies flow upward only; Repository sees Infrastructure/Protocols and Domain entities (single-module: this crossing emits no import to catch)."
+    severity: error
+
+  # Single SPM module: Repository must not reach up into Domain/Services/Protocols.
+  # Domain/Services is above Repository in the layer order; Repository's allowlist is
+  # Infrastructure/Protocols, Domain/Entities, and Error. These protocol names emit no
+  # `import` to catch (same module), so guard them by literal type name.
+  # UnitOfWorkProtocol and Transaction are intentionally absent: they were moved to
+  # Domain/Entities (legal for Repository) in the UoW protocol-relocation fix.
+  repository_no_domain_service_types:
+    included: "Sources/Repository/.*\\.swift"
+    name: "Repository must not reference Domain/Services protocol types"
+    regex: "\\b(AppleScriptRunnerServiceProtocol|BrowseLauncherServiceProtocol|CategoryServiceProtocol|CommandRunnerServiceProtocol|LaunchAtLoginServiceProtocol|NotificationServiceProtocol|RunHistoryServiceProtocol|SavedEntryServiceProtocol|TerminalSettingsServiceProtocol|WorkingDirectoryResolverProtocol)\\b"
+    message: "Repository must not reference Domain/Services protocol types. Domain/Services is above Repository in the layer order; only Domain/Entities, Infrastructure/Protocols, and Error are in scope (single-module: this crossing emits no import to catch)."
+    severity: error
+
+  # ── Safety escape hatches ──────────────────────────────────────────────────
+  # Forbid mechanisms that bypass Swift's type / concurrency safety.
+  # All resolved at zero usage as of introduction; rules guard against regression.
+  no_unchecked_sendable:
+    name: "No @unchecked Sendable"
+    regex: "@unchecked\\s+Sendable"
+    message: "@unchecked Sendable bypasses concurrency safety. Use Mutex for shared state, restructure ownership, or rely on @preconcurrency import to silence framework-side warnings."
+    severity: error
+
+  no_unsafe_concurrency_or_pointer:
+    name: "No nonisolated(unsafe) / Unsafe*Pointer / unsafeBitCast"
+    regex: "(nonisolated\\(unsafe\\)|Unsafe[A-Za-z]*Pointer|unsafeBitCast)"
+    message: "Avoid Swift safety escape hatches. Use Mutex for cross-actor state and safe alternatives for memory access."
+    severity: error
+
+  no_anyview:
+    included: "Sources/Presentation/.*\\.swift"
+    name: "No AnyView"
+    regex: "\\bAnyView\\b"
+    message: "AnyView erases type info and defeats SwiftUI's diffing. Use @ViewBuilder, generic Content, or restructure the view hierarchy."
+    severity: error
+
+  no_osallocatedunfairlock:
+    name: "No OSAllocatedUnfairLock"
+    regex: "\\bOSAllocatedUnfairLock\\b"
+    message: "Use Mutex (from Synchronization) for thread-safe mutable state. OSAllocatedUnfairLock is deprecated in this codebase; see CLAUDE.md."
+    severity: error

@@ -1,0 +1,2 @@
+struct UndoRequest: UseCaseRequest {
+}
