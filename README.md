@@ -1,4 +1,4 @@
-# Kanvas (仮名)
+# Kanvas
 
 A Kanban-first task manager for macOS where **every ticket carries its own
 spatial canvas and Markdown detail**. Track work on a Kanban board, then drill
