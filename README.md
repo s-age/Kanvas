@@ -44,6 +44,7 @@ claude mcp add --scope user kanvas /Applications/Kanvas.app/Contents/MacOS/Kanva
 Homebrew (cask):
 
 ```sh
+brew tap s-age/kanvas
 brew install --cask s-age/kanvas/kanvas
 ```
 
