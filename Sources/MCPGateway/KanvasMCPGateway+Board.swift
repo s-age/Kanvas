@@ -1,7 +1,10 @@
 import Foundation
 
-/// `board_*` operations — the Kanban top level (boards, columns, cards). All return JSON; write
-/// ops echo the refreshed board so the model sees the result without a follow-up read.
+/// `board_*` operations — the Kanban top level (boards, columns, cards). All return JSON. Reads echo
+/// the requested view; write ops echo a **token-light** result scoped to what changed (the affected
+/// card via `CardEchoOut`, the column list via `BoardColumnsOut`, or `{deletedID}`) — never the whole
+/// board, whose card summaries dwarf the edit (hundreds of cards on a busy board). The model re-reads
+/// the full board with `board_get` only when it needs it.
 extension KanvasMCPGateway {
 
     public func listBoards() async throws -> String {
@@ -52,7 +55,7 @@ extension KanvasMCPGateway {
                 assignee: Self.requestEdit(assignee), schedule: try Self.scheduleEdit(schedule)
             )
         )
-        return try MCPJSON.encode(BoardOut(result.board))
+        return try MCPJSON.encode(Self.locateCard(result.board, id: id))
     }
 
     /// Sets (or clears) **only** a card's linked PR URL, leaving every other field untouched — the
@@ -71,34 +74,36 @@ extension KanvasMCPGateway {
 
     /// Moves a card to a column, dropping it before `beforeCardID` (or appending when nil).
     public func moveCard(cardID: String, toColumnID: String, beforeCardID: String?) async throws -> String {
+        let id = try uuid(cardID, "cardID")
         let result = try await moveCardUseCase.execute(MoveCardRequest(
-            cardID: uuid(cardID, "cardID"),
+            cardID: id,
             toColumnID: uuid(toColumnID, "toColumnID"),
             beforeCardID: try beforeCardID.map { try uuid($0, "beforeCardID") }
         ))
-        return try MCPJSON.encode(BoardOut(result.board))
+        return try MCPJSON.encode(Self.locateCard(result.board, id: id))
     }
 
     public func deleteCard(cardID: String) async throws -> String {
-        let board = try await deleteCardUseCase.execute(DeleteCardRequest(cardID: uuid(cardID, "cardID")))
-        return try MCPJSON.encode(BoardOut(board))
+        let id = try uuid(cardID, "cardID")
+        _ = try await deleteCardUseCase.execute(DeleteCardRequest(cardID: id))
+        return try MCPJSON.encode(DeletedOut(deletedID: id))
     }
 
     public func addColumn(title: String) async throws -> String {
         let board = try await addColumnUseCase.execute(AddColumnRequest(title: title))
-        return try MCPJSON.encode(BoardOut(board))
+        return try MCPJSON.encode(BoardColumnsOut(board))
     }
 
     public func renameColumn(columnID: String, title: String) async throws -> String {
         let board = try await renameColumnUseCase.execute(
             RenameColumnRequest(columnID: uuid(columnID, "columnID"), title: title)
         )
-        return try MCPJSON.encode(BoardOut(board))
+        return try MCPJSON.encode(BoardColumnsOut(board))
     }
 
     public func deleteColumn(columnID: String) async throws -> String {
         let board = try await deleteColumnUseCase.execute(DeleteColumnRequest(columnID: uuid(columnID, "columnID")))
-        return try MCPJSON.encode(BoardOut(board))
+        return try MCPJSON.encode(BoardColumnsOut(board))
     }
 
     /// Edits **one** column's appearance (the five colour fields + the indicator dot) and/or its
@@ -133,7 +138,7 @@ extension KanvasMCPGateway {
             indicatorColorHex: Self.keepClearSet(appearance.indicatorColorHex),
             isCompletionColumn: appearance.isCompletionColumn
         ))
-        return try MCPJSON.encode(BoardOut(response))
+        return try MCPJSON.encode(BoardColumnsOut(response))
     }
 
     /// Translates one colour argument from the MCP string sentinel into the Request's double-optional
@@ -177,6 +182,19 @@ extension KanvasMCPGateway {
     /// field-aware copy so the error names the offending colour field. (ticket C5994D2A)
     static func isValidHexColor(_ value: String) -> Bool {
         value.count == 6 && value.allSatisfy(\.isHexDigit)
+    }
+
+    /// Finds a card and the column holding it in a refreshed board response, for the single-card
+    /// write echoes (`editCard` / `moveCard`). Throws `notFound` if the id is absent — the card was
+    /// just written, so a miss means a concurrent foreign delete landed between the mutation and this
+    /// read (the shared multi-process store); surfacing it beats echoing a card that no longer exists.
+    static func locateCard(_ board: BoardResponse, id: UUID) throws -> CardEchoOut {
+        for column in board.columns {
+            if let card = column.cards.first(where: { $0.id == id }) {
+                return CardEchoOut(card, columnID: column.id)
+            }
+        }
+        throw KanvasMCPError.notFound(kind: "Card", id: id.uuidString)
     }
 
     /// Builds an `EditCardRequest` that changes only the given fields (the rest stay unchanged via

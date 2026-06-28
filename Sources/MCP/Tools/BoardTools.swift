@@ -37,7 +37,7 @@ func boardTools(_ gateway: KanvasMCPGateway) -> [any MCPTool] {
 
         ClosureTool(
             name: "board_card_edit",
-            description: "Edit a card's title, Markdown, assignee, and/or schedule. Omit a field to leave it unchanged. A card's status is its column — change status with board_card_move, not here.",
+            description: "Edit a card's title, Markdown, assignee, and/or schedule. Omit a field to leave it unchanged. A card's status is its column — change status with board_card_move, not here. Returns only the edited card {id, columnID, title, status, ...}, not the whole board — use board_get for the full board.",
             inputSchema: objectSchema([
                 ("cardID", "string", "UUID of the card to edit.", true),
                 ("title", "string", "New title (omit to keep).", false),
@@ -68,7 +68,7 @@ func boardTools(_ gateway: KanvasMCPGateway) -> [any MCPTool] {
 
         ClosureTool(
             name: "board_card_move",
-            description: "Move a card to a column. Drops it before 'beforeCardID', or appends to the end when that is omitted.",
+            description: "Move a card to a column. Drops it before 'beforeCardID', or appends to the end when that is omitted. Returns only the moved card {id, columnID, title, status, ...}, not the whole board — use board_get for the full board.",
             inputSchema: objectSchema([
                 ("cardID", "string", "UUID of the card to move.", true),
                 ("toColumnID", "string", "UUID of the destination column.", true),
@@ -84,7 +84,7 @@ func boardTools(_ gateway: KanvasMCPGateway) -> [any MCPTool] {
 
         ClosureTool(
             name: "board_card_delete",
-            description: "Delete a card from the active board. Returns the refreshed board.",
+            description: "Delete a card from the active board. Returns {deletedID} — use board_get for the refreshed board.",
             inputSchema: objectSchema([
                 ("cardID", "string", "UUID of the card to delete.", true),
             ])
@@ -92,7 +92,7 @@ func boardTools(_ gateway: KanvasMCPGateway) -> [any MCPTool] {
 
         ClosureTool(
             name: "board_column_add",
-            description: "Add a column to the active board. Returns the refreshed board.",
+            description: "Add a column to the active board. Returns the board's columns (id, title, sortIndex, colours, cardCount) without the card lists — use board_get for the cards.",
             inputSchema: objectSchema([
                 ("title", "string", "Column title (non-empty).", true),
             ])
@@ -100,7 +100,7 @@ func boardTools(_ gateway: KanvasMCPGateway) -> [any MCPTool] {
 
         ClosureTool(
             name: "board_column_rename",
-            description: "Rename a column on the active board. Returns the refreshed board.",
+            description: "Rename a column on the active board. Returns the board's columns (id, title, sortIndex, colours, cardCount) without the card lists — use board_get for the cards.",
             inputSchema: objectSchema([
                 ("columnID", "string", "UUID of the column.", true),
                 ("title", "string", "New title (non-empty).", true),
@@ -111,7 +111,7 @@ func boardTools(_ gateway: KanvasMCPGateway) -> [any MCPTool] {
 
         ClosureTool(
             name: "board_column_delete",
-            description: "Delete a column from the active board. Returns the refreshed board.",
+            description: "Delete a column from the active board. Returns the remaining columns (id, title, sortIndex, colours, cardCount) without the card lists — use board_get for the cards.",
             inputSchema: objectSchema([
                 ("columnID", "string", "UUID of the column to delete.", true),
             ])
@@ -119,7 +119,7 @@ func boardTools(_ gateway: KanvasMCPGateway) -> [any MCPTool] {
 
         ClosureTool(
             name: "board_column_appearance_edit",
-            description: "Edit ONE column's appearance — its colours and/or its completion flag — on the active board, leaving every other column and all board-level settings untouched. This mirrors the app's Settings > Board per-column editor. Colour fields take a bare 6-digit RGB hex string 'RRGGBB' (no leading '#', e.g. '3478F6') — the same format board_get returns. Per colour field the convention is: OMIT the key to leave it unchanged; pass an EMPTY string to clear it back to the system default; pass a hex string to set it. Omit 'isCompletionColumn' to leave it unchanged. Returns the refreshed board.",
+            description: "Edit ONE column's appearance — its colours and/or its completion flag — on the active board, leaving every other column and all board-level settings untouched. This mirrors the app's Settings > Board per-column editor. Colour fields take a bare 6-digit RGB hex string 'RRGGBB' (no leading '#', e.g. '3478F6') — the same format board_get returns. Per colour field the convention is: OMIT the key to leave it unchanged; pass an EMPTY string to clear it back to the system default; pass a hex string to set it. Omit 'isCompletionColumn' to leave it unchanged. Returns the board's columns (id, title, sortIndex, colours, cardCount) without the card lists — use board_get for the cards.",
             inputSchema: objectSchema([
                 ("columnID", "string", "UUID of the column to restyle.", true),
                 ("headerColorHex", "string", "Header background colour (hex). Omit to keep; empty string clears to default.", false),
