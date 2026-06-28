@@ -1,6 +1,6 @@
 cask "kanvas" do
-  version "0.1.0"
-  sha256 "8781a0c7fbe1329752375757aaefa3c249aa235ed30a4d22279ffb88f0ba1348"
+  version "0.1.1"
+  sha256 "30fca9df5c2b41c180a7ee2268eca2d9e817f71967e48641b5e2049d2fc87f09"
 
   url "https://github.com/s-age/kanvas/releases/download/v#{version}/Kanvas-#{version}.dmg"
   name "Kanvas"
