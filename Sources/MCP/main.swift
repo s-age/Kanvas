@@ -14,7 +14,7 @@ let toolsByName = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0) })
 
 let server = Server(
     name: "kanvas-mcp",
-    version: "0.1.0",
+    version: "0.1.1",
     capabilities: .init(tools: .init(listChanged: false))
 )
 

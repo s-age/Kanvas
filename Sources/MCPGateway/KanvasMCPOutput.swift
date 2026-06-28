@@ -203,6 +203,87 @@ struct CardCreatedOut: Encodable {
     let board: BoardOut
 }
 
+// MARK: - Minimal write echoes (token-light)
+
+/// Token-light echo for a single-card write (`board_card_edit` / `board_card_move`): just the
+/// affected card plus the column it now sits in — **not** the whole refreshed board. A title-only
+/// edit would otherwise re-emit every card summary on the active board (hundreds on a busy board, ~22k
+/// tokens here), even though only one card changed. The model addresses the card by id and re-reads
+/// the full board with `board_get` only when it actually needs the wider picture. Mirrors the
+/// already-light `board_card_set_pr_url` → `CardPRURLOut` path.
+struct CardEchoOut: Encodable {
+    let columnID: UUID
+    let id: UUID
+    let title: String
+    let status: String
+    let hasSchedule: Bool
+    let labelCount: Int
+
+    init(_ summary: CardSummary, columnID: UUID) {
+        self.columnID = columnID
+        id = summary.id
+        title = summary.title
+        status = summary.status.rawValue
+        hasSchedule = summary.hasSchedule
+        labelCount = summary.labelCount
+    }
+}
+
+/// Echo for a delete (`board_card_delete`): just the id that was removed, so the model confirms the
+/// target without the whole refreshed board (the deleted card is gone; listing the survivors would be
+/// the same blow-up the other echoes avoid).
+struct DeletedOut: Encodable {
+    let deletedID: UUID
+}
+
+/// Token-light echo for a column write (`board_column_add` / `_rename` / `_delete` /
+/// `_appearance_edit`): the board's columns with their metadata and per-column card *counts* — but
+/// not the card summaries themselves. Column ops never touch card contents, and a board can carry
+/// hundreds of cards, so echoing the cards would reintroduce the blow-up these echoes exist to kill.
+/// Listing the columns also surfaces `board_column_add`'s new column id, which the use case otherwise
+/// only returns buried in the full board.
+struct BoardColumnsOut: Encodable {
+    let id: UUID
+    let title: String
+    let columns: [ColumnMetaOut]
+
+    init(_ response: BoardResponse) {
+        id = response.board.id
+        title = response.board.title
+        columns = response.columns.map(ColumnMetaOut.init)
+    }
+}
+
+/// One column without its card summaries — the per-column shape inside `BoardColumnsOut`. Carries the
+/// colour fields (so an appearance edit echoes the resolved result) plus a bare `cardCount`.
+struct ColumnMetaOut: Encodable {
+    let id: UUID
+    let title: String
+    let sortIndex: Int
+    let isCompletionColumn: Bool
+    let headerColorHex: String?
+    let headerTextColorHex: String?
+    let bodyColorHex: String?
+    let headerBorderColorHex: String?
+    let bodyBorderColorHex: String?
+    let indicatorColorHex: String?
+    let cardCount: Int
+
+    init(_ response: ColumnResponse) {
+        id = response.id
+        title = response.title
+        sortIndex = response.sortIndex
+        isCompletionColumn = response.isCompletionColumn
+        headerColorHex = response.headerColorHex
+        headerTextColorHex = response.headerTextColorHex
+        bodyColorHex = response.bodyColorHex
+        headerBorderColorHex = response.headerBorderColorHex
+        bodyBorderColorHex = response.bodyBorderColorHex
+        indicatorColorHex = response.indicatorColorHex
+        cardCount = response.cards.count
+    }
+}
+
 struct MarkdownOut: Encodable {
     let cardID: UUID
     let title: String
