@@ -6,19 +6,23 @@ import AppKit
 // honouring an optional waypoint (the central deformation point): elbow routes source→waypoint→
 // target as two orthogonal legs, curve bends its control points through the waypoint. Split out of
 // `+Connectors` for the file_length budget; the structs below are shared across this file and its
-// siblings `+ConnectorAutoRoute.swift` (automatic-route fold guard) and `+ConnectorTrim.swift`
-// (arrow-cap tail trim).
+// siblings `+ConnectorAutoRoute.swift` (Phase 1 automatic-route fold guard), `+ConnectorTrim.swift`
+// (arrow-cap tail trim), and `+ConnectorRectRouting.swift` (Phase 2 rect-aware detour, ticket
+// 805F3652).
 
-/// View-space geometry of a connector: its two endpoints, the edges they attach to, and an optional
-/// waypoint (the central deformation point in view space, when the connector carries one). Bundles
-/// the values so the path builders stay within the parameter budget. `waypoint == nil` ⇒ the
-/// automatic (un-deformed) route.
+/// View-space geometry of a connector: its two endpoints, the edges they attach to, an optional
+/// waypoint (the central deformation point in view space, when the connector carries one), and the
+/// two endpoint stickies' view-space rects (`nil` for a `straight` connector, which needs neither
+/// waypoint nor rect-aware routing — ticket 805F3652 Phase 2 §A). Bundles the values so the path
+/// builders stay within the parameter budget. `waypoint == nil` ⇒ the automatic (un-deformed) route.
 struct ConnectorViewGeometry {
     let start: CGPoint
     let end: CGPoint
     let sourceEdge: CanvasEdgeResponse
     let targetEdge: CanvasEdgeResponse
     var waypoint: CGPoint?
+    var sourceRect: CGRect?
+    var targetRect: CGRect?
 }
 
 /// The four control points of a cubic Bézier, bundled so `sampledBezier` takes one geometry arg.
@@ -68,24 +72,51 @@ extension CanvasNSView {
 
     /// Resolves a connector's two endpoints to view space, or `nil` if a sticky is gone. When the
     /// connector carries a waypoint offset *and* its routing deforms (elbow/curve), the waypoint's
-    /// view position is resolved too (world midpoint of the two endpoint mids + offset). A `straight`
-    /// connector ignores the offset (no deformation, no handle), so its geometry carries no waypoint.
+    /// view position is resolved too (world midpoint of the two endpoint mids + offset) — re-clamped
+    /// outside both endpoint rects with the same function `commitConnectorWaypoint` uses at commit
+    /// time, so a sticky moved after the commit can't leave a stale waypoint inside it (display-only:
+    /// `waypointOffsetX/Y` is never rewritten here — ticket 805F3652 Phase 2 §C). A `straight`
+    /// connector ignores the offset (no deformation, no handle) and needs no rect, so its geometry
+    /// carries neither.
     func connectorViewGeometry(_ connector: ConnectorResponse) -> ConnectorViewGeometry? {
         guard let sourceMid = edgeMidpointWorld(stickyID: connector.sourceStickyID, edge: connector.sourceEdge),
               let targetMid = edgeMidpointWorld(stickyID: connector.targetStickyID, edge: connector.targetEdge) else {
             return nil
         }
         var waypoint: CGPoint?
-        if connector.routing != .straight,
-           let dx = connector.waypointOffsetX, let dy = connector.waypointOffsetY {
-            let base = waypointOffsetBasis(sourceMid: sourceMid, targetMid: targetMid)
-            waypoint = worldToView(CGPoint(x: base.x + dx, y: base.y + dy))
+        var sourceRectWorld: CGRect?
+        var targetRectWorld: CGRect?
+        if connector.routing != .straight {
+            sourceRectWorld = worldRect(stickyID: connector.sourceStickyID)
+            targetRectWorld = worldRect(stickyID: connector.targetStickyID)
+            if let dx = connector.waypointOffsetX, let dy = connector.waypointOffsetY {
+                let base = waypointOffsetBasis(sourceMid: sourceMid, targetMid: targetMid)
+                var waypointWorld = CGPoint(x: base.x + dx, y: base.y + dy)
+                if let sourceRectWorld, let targetRectWorld {
+                    waypointWorld = clampWaypointOutsideRects(waypointWorld, sourceRect: sourceRectWorld,
+                                                              targetRect: targetRectWorld)
+                }
+                waypoint = worldToView(waypointWorld)
+            }
         }
         return ConnectorViewGeometry(
             start: worldToView(sourceMid), end: worldToView(targetMid),
             sourceEdge: connector.sourceEdge, targetEdge: connector.targetEdge,
-            waypoint: waypoint
+            waypoint: waypoint,
+            sourceRect: sourceRectWorld.map(viewRect(fromWorldRect:)),
+            targetRect: targetRectWorld.map(viewRect(fromWorldRect:))
         )
+    }
+
+    /// `rectWorld` transformed to view space via its two diagonal corners (not `origin + size×scale`)
+    /// — so a sticky's `viewRect` corner and a connector endpoint's `worldToView` corner are
+    /// bit-identical, which the router's boundary-touch exclusion (`+ConnectorRectRouting.swift`)
+    /// depends on.
+    private func viewRect(fromWorldRect rectWorld: CGRect) -> CGRect {
+        let p1 = worldToView(CGPoint(x: rectWorld.minX, y: rectWorld.minY))
+        let p2 = worldToView(CGPoint(x: rectWorld.maxX, y: rectWorld.maxY))
+        return CGRect(x: min(p1.x, p2.x), y: min(p1.y, p2.y),
+                      width: abs(p2.x - p1.x), height: abs(p2.y - p1.y))
     }
 
     /// The world-space basis the waypoint offset is stored relative to: the midpoint of the two
@@ -140,14 +171,20 @@ extension CanvasNSView {
         // perpendicular (so the connector still "exits"/"enters" the stickies cleanly). Each leg turns
         // its perpendicular excursion through the *waypoint's* off-axis coordinate (not the endpoint's
         // own), at a midpoint corner that straddles the waypoint — so the two legs' parallel
-        // excursions sit at different positions and never retrace one another. Without a waypoint, the
-        // classic single-bend H-V-H / V-H-V midline.
+        // excursions sit at different positions and never retrace one another. Each leg is then
+        // independently checked against both endpoint rects and re-routed via `safeElbowLeg`
+        // (+ConnectorRectRouting.swift) if it crosses either one — a no-op when the direct leg is
+        // already clear (ticket 805F3652 Phase 2 §C; the waypoint itself is already clamped outside
+        // both rects by `connectorViewGeometry`, so this only has to save the LEG shape). Without a
+        // waypoint, the classic single-bend H-V-H / V-H-V midline.
         if let waypoint = geo.waypoint {
-            return [geo.start]
-                + leavingElbowLeg(from: geo.start, to: waypoint, leavingEdge: geo.sourceEdge)
+            let leaving = [geo.start] + leavingElbowLeg(from: geo.start, to: waypoint, leavingEdge: geo.sourceEdge)
                 + [waypoint]
-                + arrivingElbowLeg(from: waypoint, to: geo.end, arrivingEdge: geo.targetEdge)
-                + [geo.end]
+            let arriving = [waypoint]
+                + arrivingElbowLeg(from: waypoint, to: geo.end, arrivingEdge: geo.targetEdge) + [geo.end]
+            let safeLeaving = safeElbowLeg(direct: leaving, from: geo.start, to: waypoint, in: geo)
+            let safeArriving = safeElbowLeg(direct: arriving, from: waypoint, to: geo.end, in: geo)
+            return dedupedPolyline(safeLeaving + safeArriving)
         }
         // Automatic (un-deformed) route. Step out of *both* edges along their outward normals by the
         // same offset `o` that `curve(_:)` uses, so the route brackets out by a guaranteed height even
@@ -158,21 +195,28 @@ extension CanvasNSView {
         // no-op everywhere else — including the AF4CE767-guaranteed same-level bracket, whose Δ=0
         // never satisfies the fold condition (ticket 805F3652).
         let fullOffset = connectorNormalOffset(start: geo.start, end: geo.end)
+        let phase1Route: [CGPoint]
         if let shelf = elbowAutoRouteShelf(geo, fullOffset: fullOffset) {
-            return dedupedPolyline(shelf)
+            phase1Route = dedupedPolyline(shelf)
+        } else {
+            let offset = elbowAutoRouteOffset(geo, fullOffset: fullOffset)
+            let n1 = outwardNormal(geo.sourceEdge)
+            let n2 = outwardNormal(geo.targetEdge)
+            let sPrime = CGPoint(x: geo.start.x + n1.dx * offset, y: geo.start.y + n1.dy * offset)
+            let ePrime = CGPoint(x: geo.end.x + n2.dx * offset, y: geo.end.y + n2.dy * offset)
+            // Source normal vertical (top/bottom) ⇒ the corner shares the source's stepped-out y and
+            // the target's stepped-out x; horizontal ⇒ the axis-mirror.
+            let sourceVertical = geo.sourceEdge == .top || geo.sourceEdge == .bottom
+            let corner = sourceVertical
+                ? CGPoint(x: ePrime.x, y: sPrime.y)
+                : CGPoint(x: sPrime.x, y: ePrime.y)
+            phase1Route = dedupedPolyline([geo.start, sPrime, corner, ePrime, geo.end])
         }
-        let offset = elbowAutoRouteOffset(geo, fullOffset: fullOffset)
-        let n1 = outwardNormal(geo.sourceEdge)
-        let n2 = outwardNormal(geo.targetEdge)
-        let sPrime = CGPoint(x: geo.start.x + n1.dx * offset, y: geo.start.y + n1.dy * offset)
-        let ePrime = CGPoint(x: geo.end.x + n2.dx * offset, y: geo.end.y + n2.dy * offset)
-        // Source normal vertical (top/bottom) ⇒ the corner shares the source's stepped-out y and the
-        // target's stepped-out x; horizontal ⇒ the axis-mirror.
-        let sourceVertical = geo.sourceEdge == .top || geo.sourceEdge == .bottom
-        let corner = sourceVertical
-            ? CGPoint(x: ePrime.x, y: sPrime.y)
-            : CGPoint(x: sPrime.x, y: ePrime.y)
-        return dedupedPolyline([geo.start, sPrime, corner, ePrime, geo.end])
+        // Phase 2 §B: the direct Phase 1 route above is tried first and kept as-is whenever it clears
+        // both endpoint rects; `safeAutoRoute` (+ConnectorRectRouting.swift) only replaces it with a
+        // detour when it doesn't, and both fold-guard branches feed into that one check (ticket
+        // 805F3652).
+        return safeAutoRoute(direct: phase1Route, in: geo, offset: fullOffset)
     }
 
     /// The perpendicular step-out distance shared by the automatic elbow route and `curve(_:)`:
@@ -186,8 +230,9 @@ extension CanvasNSView {
     /// automatic-elbow route (e.g. top→top at the same level, where the corner coincides with a
     /// stepped-out point) produces such duplicates; removing them keeps the drawn path and the
     /// arrowhead tangent (`pts[count-2]`) well-defined. Guarantees `count >= 2` for any input whose
-    /// endpoints differ, so the path still has a direction.
-    private func dedupedPolyline(_ points: [CGPoint]) -> [CGPoint] {
+    /// endpoints differ, so the path still has a direction. Internal (not `private`) so
+    /// `+ConnectorRectRouting.swift`'s candidate generation can reuse it (ticket 805F3652 Phase 2).
+    func dedupedPolyline(_ points: [CGPoint]) -> [CGPoint] {
         var result: [CGPoint] = []
         for p in points where result.last.map({ $0 != p }) ?? true {
             result.append(p)

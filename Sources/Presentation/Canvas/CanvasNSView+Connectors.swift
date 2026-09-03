@@ -38,6 +38,13 @@ extension CanvasNSView {
         return edgeMidpoint(of: worldRect(for: .sticky(sticky)), edge: edge)
     }
 
+    /// World-space rect of a sticky, or `nil` if it's gone. Same resolution path as
+    /// `edgeMidpointWorld` (`stickyByID` → `worldRect(for:)`), so a connector's endpoint and its
+    /// sticky's rect always agree on the same live frame (ticket 805F3652 Phase 2 §A).
+    func worldRect(stickyID: UUID) -> CGRect? {
+        stickyByID[stickyID].map { worldRect(for: .sticky($0)) }
+    }
+
     /// Midpoint of `edge` on `rect`. The view is flipped (y grows downward), so `top` is `minY`.
     func edgeMidpoint(of rect: CGRect, edge: CanvasEdgeResponse) -> CGPoint {
         switch edge {
@@ -136,13 +143,19 @@ extension CanvasNSView {
     /// so padding the endpoint bounding box by that plus the arrowhead length covers the whole path.
     /// A waypoint (deformation handle) can sit outside that box, so it is unioned in first — the
     /// deformed route stays within the convex hull of {endpoints, waypoint, control points}. The
-    /// padding is always ≥ 40, so the box is never empty (no zero-area `intersects` pitfall).
+    /// two endpoint rects are unioned in too: a Phase 2 rect-avoidance detour (§B/§C, ticket 805F3652)
+    /// can run up to `connectorRectMargin` (20) past their union, and the padding below is always ≥ 40,
+    /// so even that widened detour's furthest point (rect union edge + 20) stays inside the padded box
+    /// (rect union edge + 40) with 20px to spare — and the box is never empty (no zero-area
+    /// `intersects` pitfall).
     private func connectorVisibleBounds(_ geo: ConnectorViewGeometry, strokeWidth: Double) -> CGRect {
         var bounds = CGRect(x: min(geo.start.x, geo.end.x), y: min(geo.start.y, geo.end.y),
                             width: abs(geo.end.x - geo.start.x), height: abs(geo.end.y - geo.start.y))
         if let waypoint = geo.waypoint {
             bounds = bounds.union(CGRect(origin: waypoint, size: .zero))
         }
+        if let sourceRect = geo.sourceRect { bounds = bounds.union(sourceRect) }
+        if let targetRect = geo.targetRect { bounds = bounds.union(targetRect) }
         let distance = hypot(geo.end.x - geo.start.x, geo.end.y - geo.start.y)
         let pad = max(40, distance * 0.4) + arrowMetrics(width: max(CGFloat(strokeWidth) * scale, 0.5)).length
         return bounds.insetBy(dx: -pad, dy: -pad)

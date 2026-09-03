@@ -1,6 +1,6 @@
 import AppKit
 
-// MARK: - Automatic elbow route: same-axis fold guard (ticket 805F3652)
+// MARK: - Automatic elbow route: same-axis fold guard (Phase 1, ticket 805F3652)
 //
 // The automatic (no-waypoint) elbow route in `elbowPoints` (+ConnectorPath.swift) steps both
 // endpoints out along their edges' outward normals by a shared offset, then joins them with one
@@ -10,6 +10,9 @@ import AppKit
 // non-folding case (including the AF4CE767-guaranteed same-level bracket) is untouched: capping the
 // offset for an opposite-sign edge pair (e.g. bottom→top), and an outer "shelf" route for a
 // same-sign pair (e.g. top→top) where capping alone would degenerate to a flat, edge-hugging leg.
+// This fold guard runs BEFORE the rect-aware detour in `+ConnectorRectRouting.swift` (Phase 2 §B):
+// `elbowPoints` always computes a fold-free "Phase 1 route" here first, then hands it to
+// `safeAutoRoute` to accept as-is or replace with a detour.
 
 /// A same-axis source/target edge pair's fold-relevant scalars: `delta` is the endpoints' signed
 /// separation along the shared axis (`end − start`), `s1`/`s2` are the source/target edges' outward
