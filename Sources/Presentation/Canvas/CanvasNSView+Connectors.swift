@@ -159,14 +159,14 @@ extension CanvasNSView {
         let width = max(CGFloat(connector.strokeWidth) * scale, 0.5)
 
         // For an arrow cap, stop the stroke at the arrowhead's base so the line meets the head's
-        // back edge cleanly (instead of poking into its side along a curve's changing tangent).
+        // back edge cleanly (instead of poking into its side along a curve's changing tangent). The
+        // trim only shortens the FULL geometry's tail (`connectorStrokeGeometry`, +ConnectorTrim.swift)
+        // rather than rebuilding the route from a shortened endpoint, so a waypoint still reaches the
+        // drawn line (ticket 805F3652).
         let strokePath: NSBezierPath
         let arrow = connector.cap == .arrow ? arrowMetrics(width: width) : nil
         if let arrow {
-            let backEnd = pointBack(from: geo.end, along: endTangent, by: arrow.length)
-            let trimmed = ConnectorViewGeometry(start: geo.start, end: backEnd,
-                                                sourceEdge: geo.sourceEdge, targetEdge: geo.targetEdge)
-            strokePath = connectorPath(trimmed, routing: connector.routing).path
+            strokePath = connectorStrokeGeometry(geo, routing: connector.routing, arrowLength: arrow.length).path
         } else {
             strokePath = fullPath
         }
@@ -202,7 +202,9 @@ extension CanvasNSView {
     }
 
     /// `point` moved back `amount` against `direction` (used to trim a stroke to the arrowhead base).
-    private func pointBack(from point: CGPoint, along direction: CGVector, by amount: CGFloat) -> CGPoint {
+    /// Internal (not `private`) so `+ConnectorTrim.swift`'s `connectorStrokeGeometry` can reuse the
+    /// same "move back along the tangent" primitive for the elbow/straight tail trim.
+    func pointBack(from point: CGPoint, along direction: CGVector, by amount: CGFloat) -> CGPoint {
         let len = hypot(direction.dx, direction.dy)
         guard len > 0.0001 else { return point }
         return CGPoint(x: point.x - direction.dx / len * amount, y: point.y - direction.dy / len * amount)

@@ -5,7 +5,9 @@ import AppKit
 // Builds a connector's drawn path and hit-test polyline in view space from its resolved geometry,
 // honouring an optional waypoint (the central deformation point): elbow routes source→waypoint→
 // target as two orthogonal legs, curve bends its control points through the waypoint. Split out of
-// `+Connectors` for the file_length budget; the structs below are shared between the two files.
+// `+Connectors` for the file_length budget; the structs below are shared across this file and its
+// siblings `+ConnectorAutoRoute.swift` (automatic-route fold guard) and `+ConnectorTrim.swift`
+// (arrow-cap tail trim).
 
 /// View-space geometry of a connector: its two endpoints, the edges they attach to, and an optional
 /// waypoint (the central deformation point in view space, when the connector carries one). Bundles
@@ -107,11 +109,12 @@ extension CanvasNSView {
         // straight case without an unreachable `case .straight` branch.
         switch connector.routing {
         case .elbow:
-            // The point halfway along the route by arc length. The automatic route now has three
-            // interior points ([start, sPrime, corner, ePrime, end]), so a fixed interior-vertex
-            // midpoint would bias toward the source; walking half the polyline's length lands the
-            // handle at the route's true geometric centre regardless of vertex count (ticket
-            // AF4CE767).
+            // The point halfway along the route by arc length. The automatic route has three interior
+            // points in the common case ([start, sPrime, corner, ePrime, end]), or two on the
+            // same-axis fold-guard's outer-shelf route (ticket 805F3652); either way a fixed
+            // interior-vertex midpoint would bias toward one end, so walking half the polyline's
+            // length lands the handle at the route's true geometric centre regardless of vertex count
+            // (ticket AF4CE767).
             return polylineMidpoint(elbowPoints(geo))
         case .curve:
             return cubicPoint(curve(geo), at: 0.5)
@@ -149,9 +152,16 @@ extension CanvasNSView {
         // Automatic (un-deformed) route. Step out of *both* edges along their outward normals by the
         // same offset `o` that `curve(_:)` uses, so the route brackets out by a guaranteed height even
         // when the two endpoints share an axis (the old "bend to the midline" route collapsed to a flat
-        // line there — see ticket AF4CE767). The corner joins the two stepped-out points orthogonally,
-        // turning on whichever axis the *source* normal points along.
-        let offset = connectorNormalOffset(start: geo.start, end: geo.end)
+        // line there — see ticket AF4CE767). When source/target sit on the same axis (e.g. bottom→top)
+        // stepping out by the full offset can fold the tail back over itself; `elbowAutoRouteShelf` /
+        // `elbowAutoRouteOffset` (+ConnectorAutoRoute.swift) detect and correct that case, and are a
+        // no-op everywhere else — including the AF4CE767-guaranteed same-level bracket, whose Δ=0
+        // never satisfies the fold condition (ticket 805F3652).
+        let fullOffset = connectorNormalOffset(start: geo.start, end: geo.end)
+        if let shelf = elbowAutoRouteShelf(geo, fullOffset: fullOffset) {
+            return dedupedPolyline(shelf)
+        }
+        let offset = elbowAutoRouteOffset(geo, fullOffset: fullOffset)
         let n1 = outwardNormal(geo.sourceEdge)
         let n2 = outwardNormal(geo.targetEdge)
         let sPrime = CGPoint(x: geo.start.x + n1.dx * offset, y: geo.start.y + n1.dy * offset)
