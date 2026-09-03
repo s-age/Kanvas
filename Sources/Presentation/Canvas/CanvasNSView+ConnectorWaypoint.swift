@@ -80,14 +80,26 @@ extension CanvasNSView {
     /// of the two endpoint edge midpoints (the same relative basis the geometry resolves against, so
     /// the deformed connector translates with its stickies). If an endpoint sticky has vanished the
     /// basis can't be computed, so the drag is dropped (a redraw clears the lingering preview).
+    /// Before computing the offset, the dragged point is clamped outside both endpoint rects
+    /// (`clampWaypointOutsideRects`, ruling 5: a waypoint dropped behind a sticky's edge commits to
+    /// the nearest point outside it instead — frozen fact "カギ線は waypoint を頂点として通過する" and
+    /// "付箋本体を貫通しない" can't both hold for a point actually inside a rect, ticket 805F3652 Phase
+    /// 2 §C). The preview stays free (`drawWaypointDragPreview` uses `draft.currentWorld` directly),
+    /// so only the committed value is affected. `waypointOffsetX/Y`'s storage/validation is otherwise
+    /// unchanged, so this is still the single write path (undo stays one step).
     func commitConnectorWaypoint(_ draft: ConnectorWaypointDraft) {
         guard let connector = connectors.first(where: { $0.id == draft.connectorID }),
               let base = connectorEndpointsMidpointWorld(connector) else {
             needsDisplay = true
             return
         }
-        let offsetX = Double(draft.currentWorld.x - base.x)
-        let offsetY = Double(draft.currentWorld.y - base.y)
+        var point = draft.currentWorld
+        if let sourceRect = worldRect(stickyID: connector.sourceStickyID),
+           let targetRect = worldRect(stickyID: connector.targetStickyID) {
+            point = clampWaypointOutsideRects(point, sourceRect: sourceRect, targetRect: targetRect)
+        }
+        let offsetX = Double(point.x - base.x)
+        let offsetY = Double(point.y - base.y)
         actions?.setConnectorWaypoint(id: connector.id, offsetX: offsetX, offsetY: offsetY)
     }
 
@@ -99,5 +111,90 @@ extension CanvasNSView {
             return nil
         }
         return waypointOffsetBasis(sourceMid: sourceMid, targetMid: targetMid)
+    }
+
+    // MARK: Rect clamp (ticket 805F3652 Phase 2 §C)
+    //
+    // Pure geometry — no sticky resolution, coordinate-space-agnostic (world at commit time, world
+    // again at draw time before `worldToView`) — so `commitConnectorWaypoint` above and
+    // `connectorViewGeometry` (+ConnectorPath.swift) call the exact same function rather than each
+    // rolling its own (review-checklist item 3).
+
+    /// `point` pushed outside `rect` via whichever edge is nearest, plus `margin`, or returned
+    /// unchanged if already outside. Ties break left/right/top/bottom (declaration order below,
+    /// matching the design's Python `dict`-ordered `min`).
+    private func clampOutsideRect(_ point: CGPoint, rect: CGRect, margin: CGFloat) -> CGPoint {
+        guard pointStrictlyInside(point, rect: rect) else { return point }
+        let distLeft = point.x - rect.minX
+        let distRight = rect.maxX - point.x
+        let distTop = point.y - rect.minY
+        let distBottom = rect.maxY - point.y
+        let nearest = min(distLeft, distRight, distTop, distBottom)
+        if nearest == distLeft { return CGPoint(x: rect.minX - margin, y: point.y) }
+        if nearest == distRight { return CGPoint(x: rect.maxX + margin, y: point.y) }
+        if nearest == distTop { return CGPoint(x: point.x, y: rect.minY - margin) }
+        return CGPoint(x: point.x, y: rect.maxY + margin)
+    }
+
+    private func pointStrictlyInside(_ point: CGPoint, rect: CGRect, eps: CGFloat = 1e-9) -> Bool {
+        rect.minX + eps <= point.x && point.x <= rect.maxX - eps
+            && rect.minY + eps <= point.y && point.y <= rect.maxY - eps
+    }
+
+    private func clamp2Step(_ point: CGPoint, sourceRect: CGRect, targetRect: CGRect, margin: CGFloat) -> CGPoint {
+        clampOutsideRect(clampOutsideRect(point, rect: sourceRect, margin: margin), rect: targetRect, margin: margin)
+    }
+
+    private struct SeparatingGap {
+        let axis: Axis
+        let gap: CGFloat
+        let mid: CGFloat
+        enum Axis { case x, y }
+    }
+
+    /// The axis (or axes) on which `sourceRect`/`targetRect` are actually separated, with the gap size
+    /// and its midpoint. Empty only when the two rects overlap (out of scope — see `safeAutoRoute`'s
+    /// doc comment for the same boundary).
+    private func separatingGaps(sourceRect: CGRect, targetRect: CGRect) -> [SeparatingGap] {
+        var gaps: [SeparatingGap] = []
+        if sourceRect.maxX <= targetRect.minX {
+            gaps.append(SeparatingGap(axis: .x, gap: targetRect.minX - sourceRect.maxX,
+                                      mid: (sourceRect.maxX + targetRect.minX) / 2))
+        } else if targetRect.maxX <= sourceRect.minX {
+            gaps.append(SeparatingGap(axis: .x, gap: sourceRect.minX - targetRect.maxX,
+                                      mid: (targetRect.maxX + sourceRect.minX) / 2))
+        }
+        if sourceRect.maxY <= targetRect.minY {
+            gaps.append(SeparatingGap(axis: .y, gap: targetRect.minY - sourceRect.maxY,
+                                      mid: (sourceRect.maxY + targetRect.minY) / 2))
+        } else if targetRect.maxY <= sourceRect.minY {
+            gaps.append(SeparatingGap(axis: .y, gap: sourceRect.minY - targetRect.maxY,
+                                      mid: (targetRect.maxY + sourceRect.minY) / 2))
+        }
+        return gaps
+    }
+
+    /// The waypoint clamp: two-step push-outside (source, then target; see `clampOutsideRect`), and —
+    /// only if that still leaves the point inside either rect, which happens when the two rects are
+    /// closer together than `margin` — a fallback that snaps the narrower separating axis to the gap's
+    /// midpoint (`separatingGaps`). Deterministic (no randomness) and, at the 2-step/fallback
+    /// boundary, moves only as far as `margin` from the 2-step result — smaller and smoother than
+    /// pushing to the union bbox's perimeter (design rounds 4–5 measured ~5× larger jumps there).
+    /// Returns the 2-step result unclamped when the rects overlap (`separatingGaps` empty) — out of
+    /// scope, not a crash (ticket 805F3652 Phase 2 §B/§C "既知の限界").
+    func clampWaypointOutsideRects(_ point: CGPoint, sourceRect: CGRect, targetRect: CGRect,
+                                   margin: CGFloat = connectorRectMargin) -> CGPoint {
+        let final = clamp2Step(point, sourceRect: sourceRect, targetRect: targetRect, margin: margin)
+        guard pointStrictlyInside(final, rect: sourceRect) || pointStrictlyInside(final, rect: targetRect) else {
+            return final
+        }
+        guard let chosen = separatingGaps(sourceRect: sourceRect, targetRect: targetRect)
+            .min(by: { $0.gap < $1.gap }) else {
+            return final
+        }
+        switch chosen.axis {
+        case .x: return CGPoint(x: chosen.mid, y: final.y)
+        case .y: return CGPoint(x: final.x, y: chosen.mid)
+        }
     }
 }

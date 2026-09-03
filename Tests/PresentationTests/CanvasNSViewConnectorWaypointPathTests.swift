@@ -174,15 +174,93 @@ final class CanvasNSViewConnectorWaypointPathTests: XCTestCase {
         XCTAssertNil(view.connectorWaypointHandleView(connector))
     }
 
+    // MARK: - D-1: an arrow cap must not drop the waypoint from the drawn stroke (ticket 805F3652)
+    //
+    // `drawConnector` trims the stroke to the arrowhead's base when `cap == .arrow`. The pre-fix trim
+    // rebuilt the whole route from a shortened endpoint (dropping the waypoint entirely, so the
+    // stroke drew the AUTOMATIC route while the handle/hit-test/tangent still reflected the waypoint).
+    // `connectorStrokeGeometry` instead trims the already-waypointed full geometry's tail in place.
+
+    // arrowLength is the card's literal `max(12, strokeWidth * 3.5)` values (12 / 140), written
+    // directly rather than re-derived — `arrowMetrics(width:)` stays private to +Connectors.swift and
+    // its formula isn't re-tested here (out of this card's scope; see the card's "修正方針" note).
+
+    func testArrowCapElbowWaypoint_trimmedRoute_passesThroughWaypoint_normalStrokeWidth() {
+        arrowCapElbowWaypoint_trimmedRoutePassesThroughWaypoint(strokeWidth: 2, arrowLength: 12)
+    }
+
+    func testArrowCapElbowWaypoint_trimmedRoute_passesThroughWaypoint_maxStrokeWidth() {
+        arrowCapElbowWaypoint_trimmedRoutePassesThroughWaypoint(strokeWidth: 40, arrowLength: 140)
+    }
+
+    private func arrowCapElbowWaypoint_trimmedRoutePassesThroughWaypoint(strokeWidth: Double, arrowLength: CGFloat) {
+        let connector = makeConnector(routing: .elbow, offsetX: 0, offsetY: 60, strokeWidth: strokeWidth)
+        pushScene(connector: connector)
+
+        guard let geo = view.connectorViewGeometry(connector),
+              let handle = view.connectorWaypointHandleView(connector) else {
+            return XCTFail("Expected resolvable elbow geometry + handle")
+        }
+        guard case let .elbow(trimmedPoints) = view.connectorStrokeGeometry(
+            geo, routing: .elbow, arrowLength: arrowLength) else {
+            return XCTFail("Expected .elbow stroke geometry")
+        }
+        let onRoute = trimmedPoints.contains {
+            abs($0.x - handle.x) < 0.001 && abs($0.y - handle.y) < 0.001
+        }
+
+        XCTAssertTrue(onRoute,
+                      "Trimmed elbow stroke (strokeWidth=\(strokeWidth)) must still include the waypoint vertex")
+    }
+
+    func testArrowCapCurveWaypoint_trimmedSubcurve_reparameterizesFullCurve_normalStrokeWidth() {
+        // The waypoint (full curve's t=0.5 point) must still be on the drawn subcurve's span at the
+        // normal stroke width — required only here, not for the max-width variant (card D-1).
+        let tStar = arrowCapCurveWaypoint_assertReparameterizesFullCurve(strokeWidth: 2, arrowLength: 12)
+        XCTAssertGreaterThan(tStar, 0.5,
+                             "Normal-width trim must leave the waypoint (t=0.5) on the drawn subcurve")
+    }
+
+    func testArrowCapCurveWaypoint_trimmedSubcurve_reparameterizesFullCurve_maxStrokeWidth() {
+        _ = arrowCapCurveWaypoint_assertReparameterizesFullCurve(strokeWidth: 40, arrowLength: 140)
+    }
+
+    /// De Casteljau left-split invariant: sampling the trimmed subcurve at `t'` must equal sampling
+    /// the full (waypointed) curve at `tStar*t'`. Returns `tStar` for the caller's own extra checks.
+    @discardableResult
+    private func arrowCapCurveWaypoint_assertReparameterizesFullCurve(strokeWidth: Double, arrowLength: CGFloat)
+        -> CGFloat {
+        let connector = makeConnector(routing: .curve, offsetX: 0, offsetY: 60, strokeWidth: strokeWidth)
+        pushScene(connector: connector)
+
+        guard let geo = view.connectorViewGeometry(connector) else {
+            XCTFail("Expected resolvable curve geometry")
+            return .nan
+        }
+        let full = view.curve(geo)
+        guard case let .curve(sub, tStar) = view.connectorStrokeGeometry(
+            geo, routing: .curve, arrowLength: arrowLength) else {
+            XCTFail("Expected .curve stroke geometry")
+            return .nan
+        }
+        for tp: CGFloat in [0.0, 0.3, 0.6, 1.0] {
+            let fullPt = view.cubicPoint(full, at: tStar * tp)
+            let subPt = view.cubicPoint(sub, at: tp)
+            XCTAssertEqual(fullPt.x, subPt.x, accuracy: 0.01)
+            XCTAssertEqual(fullPt.y, subPt.y, accuracy: 0.01)
+        }
+        return tStar
+    }
+
     // MARK: - Helpers
 
-    private func makeConnector(routing: ConnectorRoutingResponse, offsetX: Double, offsetY: Double)
-        -> ConnectorResponse {
+    private func makeConnector(routing: ConnectorRoutingResponse, offsetX: Double, offsetY: Double,
+                               strokeWidth: Double = 2) -> ConnectorResponse {
         ConnectorResponse(
             id: connectorID, sourceStickyID: sourceID, sourceEdge: .right,
             targetStickyID: targetID, targetEdge: .left,
             cap: .arrow, routing: routing, strokeColorHex: nil,
-            strokeWidth: 2, minStrokeWidth: 1, maxStrokeWidth: 40,
+            strokeWidth: strokeWidth, minStrokeWidth: 1, maxStrokeWidth: 40,
             waypointOffsetX: offsetX, waypointOffsetY: offsetY
         )
     }

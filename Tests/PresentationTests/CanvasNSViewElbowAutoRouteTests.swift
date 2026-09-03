@@ -196,7 +196,80 @@ final class CanvasNSViewElbowAutoRouteTests: XCTestCase {
         XCTAssertEqual(view.connectorNormalOffset(start: start, end: end), 40, accuracy: 0.001)
     }
 
+    // MARK: - D-2: automatic route must not fold back on itself (ticket 805F3652)
+    //
+    // The existing `antiParallel` check (`a+b≈0`) only catches an EQUAL-length reversal; the reported
+    // bug (52px up, 115px down) is asymmetric and slips past it. The correct check is that no two
+    // adjacent segments' direction vectors have a negative dot product (a reversal, of any length).
+
+    func testElbowAuto_bottomToTop_reportedScreenshotCase_doesNotFold() {
+        // Screenshot 2's sticky centers (100x80 stickies, half-height 40): source bottom-mid (485,422),
+        // target top-mid (711,600) ⇒ Δy≈178, offset≈115 (< 2*offset=230 ⇒ pre-fix this folds).
+        let connector = makeConnector(sourceEdge: .bottom, targetEdge: .top)
+        pushScene(connector: connector, sourceCenter: CGPoint(x: 485, y: 382),
+                  targetCenter: CGPoint(x: 711, y: 640))
+
+        guard let geo = view.connectorViewGeometry(connector) else {
+            return XCTFail("Expected resolvable elbow geometry")
+        }
+        assertRouteDoesNotFold(view.elbowPoints(geo))
+    }
+
+    func testElbowAuto_bottomToTop_foldBoundarySweep() {
+        // Offset floors at 40 for these nearby endpoints (distance <= 100), so the fold boundary sits
+        // at Δy == 2*40 == 80. Δy=79 folds pre-fix; 80 (boundary) and 81 must never fold.
+        for deltaY: Double in [79, 80, 81] {
+            let connector = makeConnector(sourceEdge: .bottom, targetEdge: .top)
+            pushScene(connector: connector, sourceCenter: CGPoint(x: 0, y: 0),
+                      targetCenter: CGPoint(x: 0, y: deltaY + 80))
+
+            guard let geo = view.connectorViewGeometry(connector) else {
+                return XCTFail("Expected resolvable elbow geometry (Δy=\(deltaY))")
+            }
+            assertRouteDoesNotFold(view.elbowPoints(geo), "Δy=\(deltaY)")
+        }
+    }
+
+    func testElbowAuto_sameSignPair_targetOnFarSide_doesNotFold_andKeepsClearance() {
+        // Newly-discovered same-sign fold (top→top / bottom→bottom): current code folds here too.
+        // Source/target are offset in x so the route isn't the degenerate Δx=0 spike (a separate,
+        // acknowledged Phase-2 case). `pickShelf`/`clearance` account for the mirrored sign between
+        // the two edges (top's outward normal is up/−y, bottom's is down/+y).
+        let cases: [(source: CanvasEdgeResponse, target: CanvasEdgeResponse, targetCenter: CGPoint,
+                    pickShelf: ([CGFloat]) -> CGFloat, clearance: (CGFloat, CGFloat) -> CGFloat)] = [
+            (.top, .top, CGPoint(x: 100, y: -300), { $0.min() ?? .nan }, { shelf, end in end - shelf }),
+            (.bottom, .bottom, CGPoint(x: 100, y: 300), { $0.max() ?? .nan }, { shelf, end in shelf - end }),
+        ]
+        for c in cases {
+            let connector = makeConnector(sourceEdge: c.source, targetEdge: c.target)
+            pushScene(connector: connector, sourceCenter: CGPoint(x: -100, y: 0), targetCenter: c.targetCenter)
+
+            guard let geo = view.connectorViewGeometry(connector) else {
+                return XCTFail("Expected resolvable elbow geometry")
+            }
+            let offset = view.connectorNormalOffset(start: geo.start, end: geo.end)
+            let pts = view.elbowPoints(geo)
+            assertRouteDoesNotFold(pts, "\(c.source)->\(c.target)")
+            let shelfY = c.pickShelf(pts.map(\.y))
+            XCTAssertGreaterThanOrEqual(c.clearance(shelfY, geo.start.y), offset - 0.001,
+                                        "Shelf must keep at least the full offset clear of the source edge")
+            XCTAssertGreaterThanOrEqual(c.clearance(shelfY, geo.end.y), offset - 0.001,
+                                        "Shelf must keep at least the full offset clear of the target edge")
+        }
+    }
+
     // MARK: - Helpers
+
+    private func assertRouteDoesNotFold(_ pts: [CGPoint], _ label: String = "",
+                                        file: StaticString = #filePath, line: UInt = #line) {
+        for i in 0..<(pts.count - 2) {
+            let a = CGVector(dx: pts[i + 1].x - pts[i].x, dy: pts[i + 1].y - pts[i].y)
+            let b = CGVector(dx: pts[i + 2].x - pts[i + 1].x, dy: pts[i + 2].y - pts[i + 1].y)
+            XCTAssertGreaterThanOrEqual(a.dx * b.dx + a.dy * b.dy, 0,
+                "Segments \(i)->\(i+1) and \(i+1)->\(i+2) must not reverse direction \(label)",
+                file: file, line: line)
+        }
+    }
 
     private func makeConnector(sourceEdge: CanvasEdgeResponse, targetEdge: CanvasEdgeResponse)
         -> ConnectorResponse {
